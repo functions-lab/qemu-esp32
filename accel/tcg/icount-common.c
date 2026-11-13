@@ -356,11 +356,17 @@ void icount_start_warp_timer(void)
              * to the next QEMU_CLOCK_VIRTUAL event and notify it.
              * It is useful when we want a deterministic execution time,
              * isolated from host latencies.
+             *
+             * The jump is rounded up to whole instructions so virtual time
+             * stays on the instruction grid: a timer due on the grid is then
+             * reached exactly, not up to one instruction late.
              */
+            int shift = qatomic_read(&timers_state.icount_time_shift);
+
             seqlock_write_lock(&timers_state.vm_clock_seqlock,
                                &timers_state.vm_clock_lock);
             qatomic_set_i64(&timers_state.qemu_icount_bias,
-                            timers_state.qemu_icount_bias + deadline);
+                            timers_state.qemu_icount_bias + (icount_round(deadline) << shift));
             seqlock_write_unlock(&timers_state.vm_clock_seqlock,
                                  &timers_state.vm_clock_lock);
             qemu_clock_notify(QEMU_CLOCK_VIRTUAL);
