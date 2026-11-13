@@ -288,6 +288,18 @@ static void icount_timer_cb(void *opaque)
     icount_warp_rt();
 }
 
+static bool vcpu_stop_pending(void)
+{
+    CPUState *cpu;
+
+    CPU_FOREACH(cpu) {
+        if (cpu->stop || cpu->stopped) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void icount_start_warp_timer(void)
 {
     int64_t clock;
@@ -300,6 +312,15 @@ void icount_start_warp_timer(void)
      * do not fire, so computing the deadline does not make sense.
      */
     if (!runstate_is_running()) {
+        return;
+    }
+
+    /*
+     * A vCPU stopped while the VM still runs is waiting for a requested VM
+     * stop, not for a timer: a warp now would move the clock past the
+     * instant the guest stopped at.
+     */
+    if (vcpu_stop_pending()) {
         return;
     }
 

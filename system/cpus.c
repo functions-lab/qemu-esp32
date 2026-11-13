@@ -699,8 +699,21 @@ void cpu_stop_current(void)
 int vm_stop(RunState state)
 {
     if (qemu_in_vcpu_thread()) {
+        CPUState *cpu;
+
         qemu_system_vmstop_request_prepare();
         qemu_system_vmstop_request(state);
+        /*
+         * Every vCPU stops now, not when the main loop handles the request:
+         * under icount a vCPU running on in the meantime moves virtual time
+         * past the instant of the stop.
+         */
+        CPU_FOREACH(cpu) {
+            if (cpu != current_cpu) {
+                cpu->stop = true;
+                qemu_cpu_kick(cpu);
+            }
+        }
         /*
          * FIXME: should not return to device code in case
          * vm_stop() has been requested.
