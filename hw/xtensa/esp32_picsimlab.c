@@ -24,6 +24,7 @@
 #include "hw/i2c/i2c.h"
 #include "hw/qdev-properties.h"
 #include "hw/xtensa/esp32.h"
+#include "hw/xtensa/picsimlab.h"
 #include "hw/misc/ssi_psram.h"
 #include "hw/sd/dwc_sdmmc.h"
 #include "core-esp32/core-isa.h"
@@ -100,25 +101,6 @@ static qemu_irq *spi_cs_irq;
 
 static qemu_irq pin_irq[100];
 
-typedef struct {
-    void (*picsimlab_write_pin)(int pin, int value);
-    void (*picsimlab_dir_pin)(int pin, int value);
-    int (*picsimlab_i2c_event)(const uint8_t id, const uint8_t addr, const uint16_t event);
-    uint8_t (*picsimlab_spi_event)(const uint8_t id, const uint16_t event);
-    void (*picsimlab_uart_tx_event)(const uint8_t id, const uint8_t value);
-    const short int * pinmap;
-    void (*picsimlab_rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value);
-} callbacks_t;
-
-//prototypes
-void qemu_picsimlab_register_callbacks(void * arg);
-void qemu_picsimlab_set_apin(int chn,int value);
-void qemu_picsimlab_set_pin(int pin,int value);
-uint32_t * qemu_picsimlab_get_internals(int cfg);
-uint32_t  qemu_picsimlab_get_TIOCM(void);
-int qemu_picsimlab_flash_dump( int64_t offset, void *buf, int bytes);
-void qemu_picsimlab_uart_receive(const int id, const uint8_t *buf, int size);
-
 #define QEMU_INTERNAL_STRAP 0
 #define QEMU_INTERNAL_GPIO_IN_SEL 1
 #define QEMU_INTERNAL_GPIO_OUT_SEL 2
@@ -130,7 +112,7 @@ void qemu_picsimlab_uart_receive(const int id, const uint8_t *buf, int size);
 #define QEMU_INTERNAL_UART1_BAUD 8
 #define QEMU_INTERNAL_UART2_BAUD 9
 
-uint32_t *qemu_picsimlab_get_internals(int cfg) {
+static uint32_t *esp32_get_internals(int cfg) {
   switch (cfg) {
   case QEMU_INTERNAL_STRAP:
     return &global_s->gpio.strap_mode;
@@ -175,11 +157,11 @@ uint32_t *qemu_picsimlab_get_internals(int cfg) {
 void uart_receive(void *opaque, const uint8_t *buf, int size);
 int uart_can_receive(void *opaque);
 
-void qemu_picsimlab_uart_receive(const int id, const uint8_t *buf, int size){
+static void esp32_uart_receive(const int id, const uint8_t *buf, int size){
    uart_receive((void *) &global_s->uart[id], buf, size);
 }
 
-uint32_t qemu_picsimlab_get_TIOCM(void)
+static uint32_t esp32_get_TIOCM(void)
 {
    ESP32UARTState *s = ESP32_UART(&(global_s->uart[0]));
 
@@ -204,34 +186,7 @@ uint32_t qemu_picsimlab_get_TIOCM(void)
 }
 
 
-static void place_holder(int pin,int value){};
-static int place_holder2(const uint8_t id, const uint8_t addr, const uint16_t event){return 0;};
-static uint8_t place_holder3(const uint8_t id, const uint16_t event){return 0;};
-static void place_holder4(const uint8_t id, const uint8_t value){};
-static void place_holder5(const uint8_t channel, const uint32_t config0, const uint32_t value){};
-
-void (*picsimlab_write_pin)(int pin,int value) = place_holder;
-void (*picsimlab_dir_pin)(int pin,int value) = place_holder;
-int (*picsimlab_i2c_event)(const uint8_t id, const uint8_t addr, const uint16_t event) = place_holder2;
-uint8_t (*picsimlab_spi_event)(const uint8_t id, const uint16_t event) = place_holder3;
-void (*picsimlab_uart_tx_event)(const uint8_t id, const uint8_t value) = place_holder4;
-static const short int * pinmap = NULL;
-void (*picsimlab_rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value) = place_holder5;
-
-void qemu_picsimlab_register_callbacks(void * arg)
-{
-  const callbacks_t * callbacks = (const callbacks_t *) arg;
-
-  picsimlab_write_pin = callbacks->picsimlab_write_pin;
-  picsimlab_dir_pin = callbacks->picsimlab_dir_pin; 
-  picsimlab_i2c_event = callbacks->picsimlab_i2c_event;
-  picsimlab_spi_event = callbacks->picsimlab_spi_event;
-  picsimlab_uart_tx_event = callbacks->picsimlab_uart_tx_event;
-  pinmap = callbacks->pinmap;
-  picsimlab_rmt_event = callbacks->picsimlab_rmt_event;
-}
-
-void qemu_picsimlab_set_pin(int pin,int value)
+static void esp32_set_pin(int pin,int value)
 {
    //qemu_mutex_lock_iothread ();
    if (value){
@@ -243,13 +198,13 @@ void qemu_picsimlab_set_pin(int pin,int value)
    //qemu_mutex_unlock_iothread ();
 }
 
-void qemu_picsimlab_set_apin(int chn,int value)
+static void esp32_set_apin(int chn,int value)
 {
    Esp32SensState *s = ESP32_SENS(&(global_s->sens));  
    s->ADC_values[chn] = value;
 }
 
-int qemu_picsimlab_flash_dump( int64_t offset, void *buf, int bytes)
+static int esp32_flash_dump( int64_t offset, void *buf, int bytes)
 {
     if (global_s->dport.flash_blk){
        return blk_pread(global_s->dport.flash_blk,offset,bytes,buf,0);
@@ -275,10 +230,29 @@ psync_irq_handler(void *opaque, int n, int dir)
    picsimlab_dir_pin(-1, dir);
 }
 
+static bool spi_cs_events = true;
+
+static void esp32_enable_spi_cs_events(int enable)
+{
+    spi_cs_events = enable != 0;
+}
+
+static const PicsimlabBoard esp32_board = {
+    .set_pin = esp32_set_pin,
+    .set_apin = esp32_set_apin,
+    .get_internals = esp32_get_internals,
+    .get_tiocm = esp32_get_TIOCM,
+    .uart_receive = esp32_uart_receive,
+    .flash_dump = esp32_flash_dump,
+    .enable_spi_cs_events = esp32_enable_spi_cs_events,
+};
+
 static void
 spi_cs_irq_handler(void *opaque, int n, int level)
 {
-    picsimlab_spi_event(n >> 2, ((((n & 3)<<1)|level)<<8)|0x01);
+    if (spi_cs_events) {
+        picsimlab_spi_event(n >> 2, ((((n & 3)<<1)|level)<<8)|0x01);
+    }
 }
 
 static void remove_cpu_watchpoints(XtensaCPU* xcs)
@@ -803,6 +777,8 @@ static void esp32_soc_realize(DeviceState *dev, Error **errp)
     qdev_connect_gpio_out_named(DEVICE(&s->spi[3]), SSI_GPIO_CS, 1 , spi_cs_irq[5]);
     qdev_connect_gpio_out_named(DEVICE(&s->spi[3]), SSI_GPIO_CS, 2 , spi_cs_irq[6]);
 
+    const short int *pinmap = picsimlab_pinmap;
+    picsimlab_set_board(&esp32_board);
     if(pinmap){
       pdir_irq = qemu_allocate_irqs (pdir_irq_handler, NULL, pinmap[0]+1);
       pout_irq = qemu_allocate_irqs (pout_irq_handler, NULL, pinmap[0]+1);
