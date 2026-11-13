@@ -26,20 +26,40 @@
 
 #define IRQ_MAP(cpu, input) s->irq_map[cpu][input]
 
+/*
+ * A CPU interrupt line is the OR of the sources mapped to it, re-evaluated when
+ * a source changes and when the map changes: a source already high when it is
+ * mapped (as esp_intr_enable does) interrupts at once.
+ */
+static void update_cpu_line(Esp32s3IntMatrixState *s, int cpu, int out_index)
+{
+    if (s->outputs[cpu] == NULL) {
+        return;
+    }
+    for (int int_index = 0; int_index < s->cpu[cpu]->env.config->nextint; ++int_index) {
+        if (s->cpu[cpu]->env.config->extint[int_index] != out_index) {
+            continue;
+        }
+        bool level = false;
+        for (int n = 0; n < ESP32S3_INT_MATRIX_INPUTS && !level; n++) {
+            level = IRQ_MAP(cpu, n) == out_index && test_bit(n, s->level);
+        }
+        qemu_set_irq(s->outputs[cpu][int_index], level);
+        return;
+    }
+}
+
 static void esp32s3_intmatrix_irq_handler(void *opaque, int n, int level)
 {
     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
+
+    if (level) {
+        set_bit(n, s->level);
+    } else {
+        clear_bit(n, s->level);
+    }
     for (int i = 0; i < ESP32S3_CPU_COUNT; ++i) {
-        if (s->outputs[i] == NULL) {
-            continue;
-        }
-        int out_index = IRQ_MAP(i, n);
-        for (int int_index = 0; int_index < s->cpu[i]->env.config->nextint; ++int_index) {
-            if (s->cpu[i]->env.config->extint[int_index] == out_index) {
-                qemu_set_irq(s->outputs[i][int_index], level);
-                break;
-            }
-        }
+        update_cpu_line(s, i, IRQ_MAP(i, n));
     }
 }
 
@@ -72,7 +92,13 @@ static void esp32s3_intmatrix_write(void* opaque, hwaddr addr, uint64_t value, u
     Esp32s3IntMatrixState *s = ESP32S3_INTMATRIX(opaque);
     uint8_t* map_entry = get_map_entry(s, addr);
     if (map_entry != NULL) {
+        int cpu = (addr / sizeof(uint32_t)) / ESP32S3_INT_MATRIX_INPUTS;
+        uint8_t old = *map_entry;
         *map_entry = value & 0x1f;
+        if (old != *map_entry) {
+            update_cpu_line(s, cpu, old);
+            update_cpu_line(s, cpu, *map_entry);
+        }
     }
 }
 

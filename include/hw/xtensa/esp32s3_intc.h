@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "qemu/bitops.h"
 #include "qapi/error.h"
 #include "hw/hw.h"
 #include "hw/sysbus.h"
@@ -142,6 +143,8 @@ typedef struct Esp32s3IntMatrixState {
     MemoryRegion iomem;
     qemu_irq *outputs[ESP32S3_CPU_COUNT];
     uint8_t irq_map[ESP32S3_CPU_COUNT][ESP32S3_INT_MATRIX_INPUTS];
+    /* Current level of each source line */
+    unsigned long level[BITS_TO_LONGS(ESP32S3_INT_MATRIX_INPUTS)];
 
     /* properties */
     XtensaCPU *cpu[ESP32S3_CPU_COUNT];
