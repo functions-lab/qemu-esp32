@@ -19,9 +19,73 @@
 #include "hw/qdev-properties.h"
 #include "hw/xtensa/esp32s3_clk.h"
 #include "hw/xtensa/esp32s3_clk_defs.h"
+#include "hw/core/cpu.h"
+#include "target/xtensa/cpu.h"
 
 #define CLOCK_DEBUG      0
 #define CLOCK_WARNING    0
+
+#define XTAL_CLK_HZ     40000000
+#define RC_FAST_CLK_HZ  17500000
+
+static uint32_t esp32s3_cpu_freq_hz(ESP32S3ClockState *s)
+{
+    const uint32_t pre_div = FIELD_EX32(s->sysclk, SYSTEM_SYSCLK_CONF, PRE_DIV_CNT) + 1;
+
+    switch (FIELD_EX32(s->sysclk, SYSTEM_SYSCLK_CONF, SOC_CLK_SEL)) {
+    case ESP32S3_CLK_SEL_XTAL:
+        return XTAL_CLK_HZ / pre_div;
+    case ESP32S3_CLK_SEL_RCFAST:
+        return RC_FAST_CLK_HZ / pre_div;
+    case ESP32S3_CLK_SEL_PLL:
+        switch (FIELD_EX32(s->cpuperconf, SYSTEM_CPU_PER_CONF, CPUPERIOD_SEL)) {
+        case ESP32S3_PERIOD_SEL_80:
+            return 80000000;
+        case ESP32S3_PERIOD_SEL_160:
+            return 160000000;
+        case ESP32S3_PERIOD_SEL_240:
+            return 240000000;
+        default:
+            error_report("esp32s3.clock: reserved SYSTEM_CPUPERIOD_SEL value");
+            abort();
+        }
+    default:
+        error_report("esp32s3.clock: reserved SYSTEM_SOC_CLK_SEL value");
+        abort();
+    }
+}
+
+/*
+ * Make CCOUNT count at the new rate from now on: rebase it on its current
+ * value, then move the CCOMPARE deadlines to the new rate. Pending timer
+ * interrupts stay pending.
+ */
+static void esp32s3_clock_apply_cpu_freq(ESP32S3ClockState *s)
+{
+    const uint32_t hz = esp32s3_cpu_freq_hz(s);
+    CPUState *cs;
+
+    CPU_FOREACH(cs) {
+        XtensaCPU *cpu = XTENSA_CPU(cs);
+        CPUXtensaState *env = &cpu->env;
+
+        if (clock_get_hz(cpu->clock) == hz) {
+            continue;
+        }
+        const uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        const uint32_t ccount = env->ccount_base +
+            (uint32_t)clock_ns_to_ticks(cpu->clock, now - env->time_base);
+        env->sregs[CCOUNT] = ccount;
+        env->ccount_base = ccount;
+        env->ccount_time = now;
+        env->time_base = now;
+        clock_set_hz(cpu->clock, hz);
+        for (int i = 0; i < env->config->nccompare; i++) {
+            const uint64_t dcc = (uint64_t)(env->sregs[CCOMPARE + i] - ccount - 1) + 1;
+            timer_mod(env->ccompare[i].timer, now + clock_ticks_to_ns(cpu->clock, dcc));
+        }
+    }
+}
 
 static uint32_t esp32s3_read_cpu_intr(ESP32S3ClockState *s, uint32_t index)
 {
@@ -88,6 +152,14 @@ static void esp32s3_clock_write(void *opaque, hwaddr addr, uint64_t value,
         case A_SYSTEM_CORE_1_CONTROL_1_REG:
                 s->app_cpu_addr = (uint32_t)value;
             break;
+        case A_SYSTEM_CPU_PER_CONF:
+            s->cpuperconf = value;
+            esp32s3_clock_apply_cpu_freq(s);
+            break;
+        case A_SYSTEM_SYSCLK_CONF:
+            s->sysclk = value;
+            esp32s3_clock_apply_cpu_freq(s);
+            break;
         case A_SYSTEM_CPU_INTR_FROM_CPU_0:
         case A_SYSTEM_CPU_INTR_FROM_CPU_1:
         case A_SYSTEM_CPU_INTR_FROM_CPU_2:
@@ -114,15 +186,15 @@ static const MemoryRegionOps esp32s3_clock_ops = {
 static void esp32s3_clock_reset_hold(Object *obj, ResetType type)
 {
     ESP32S3ClockState *s = ESP32S3_CLOCK(obj);
-    /* On board reset, set the proper clocks and dividers */
-    s->sysclk = ( 1 << R_SYSTEM_SYSCLK_CONF_PRE_DIV_CNT_SHIFT) |
-                (ESP32S3_CLK_SEL_PLL << R_SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_SHIFT) |
+    /* The CPU runs from XTAL_CLK out of reset */
+    s->sysclk = (ESP32S3_CLK_SEL_XTAL << R_SYSTEM_SYSCLK_CONF_SOC_CLK_SEL_SHIFT) |
                 (40 << R_SYSTEM_SYSCLK_CONF_CLK_XTAL_FREQ_SHIFT) |
                 ( 1 << R_SYSTEM_SYSCLK_CONF_CLK_DIV_EN_SHIFT);
 
     /* Divider for PLL clock and APB  frequency */
     s->cpuperconf = (ESP32S3_PERIOD_SEL_80 << R_SYSTEM_CPU_PER_CONF_CPUPERIOD_SEL_SHIFT) |
                     (ESP32S3_FREQ_SEL_PLL_480 << R_SYSTEM_CPU_PER_CONF_PLL_FREQ_SEL_SHIFT);
+    esp32s3_clock_apply_cpu_freq(s);
 
     /* Initialize the IRQs */
     s->levels = 0;

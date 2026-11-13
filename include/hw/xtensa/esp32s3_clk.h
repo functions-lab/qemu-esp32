@@ -39,6 +39,7 @@
 */
 #define ESP32S3_PERIOD_SEL_80       0
 #define ESP32S3_PERIOD_SEL_160      1
+#define ESP32S3_PERIOD_SEL_240      2
 
 
 typedef struct ESP32S3ClockState {

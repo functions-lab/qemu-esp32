@@ -76,6 +76,8 @@ typedef struct {
     uint64_t flushed; // Mirror of the internal counter that can be seen by the guest program
     /* Absolute time, in ns, when value was updated last */
     int64_t base;
+    /* Fraction of a tick elapsed since the last whole tick, in 1/1000 ticks */
+    uint32_t subticks;
 } ESPSysTimerCounter;
 
 
@@ -98,6 +100,8 @@ typedef struct {
     /* The easiest way to implement timeout is by using one timer per comparator */
     QEMUTimer qtimer;
     uint64_t expire_time;
+    /* Counter value of the next alarm in period mode */
+    uint64_t period_target;
     qemu_irq irq;
     int cur_irq_level;
     /* Pointer to the owner */

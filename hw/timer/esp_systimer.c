@@ -22,7 +22,7 @@
 #include "hw/timer/esp_systimer.h"
 
 
-#define TICKS_TO_NS(ticks) (((ticks) / ESP_SYSTIMER_CNT_PER_US) * 1000)
+#define SUBTICKS_PER_TICK 1000
 
 #define SYSTIMER_DEBUG      0
 #define SYSTIMER_WARNING    0
@@ -32,10 +32,20 @@
  */
 static void esp_systimer_update_counter(ESPSysTimerCounter *counter) {
     const int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    const int64_t elapsed_ns = now - counter->base;
-    const int64_t ticks = (elapsed_ns * (ESP_SYSTIMER_CNT_CLK / 1000000)) / 1000;
-    counter->value = (counter->value + ticks) & ESP_SYSTIMER_52BIT_MASK;
+    const uint64_t subticks = (now - counter->base) * ESP_SYSTIMER_CNT_PER_US + counter->subticks;
+    counter->value = (counter->value + subticks / SUBTICKS_PER_TICK) & ESP_SYSTIMER_52BIT_MASK;
+    counter->subticks = subticks % SUBTICKS_PER_TICK;
     counter->base = now;
+}
+
+/**
+ * @brief Nanoseconds from the counter's last update until it has counted `ticks` more.
+ */
+static int64_t esp_systimer_ticks_to_ns(const ESPSysTimerCounter *counter, uint64_t ticks) {
+    if (ticks == 0) {
+        return 0;
+    }
+    return DIV_ROUND_UP(ticks * SUBTICKS_PER_TICK - counter->subticks, ESP_SYSTIMER_CNT_PER_US);
 }
 
 
@@ -76,23 +86,17 @@ static void esp_systimer_notify(ESPSysTimerComp* comparator)
     comparator->raw_st = 1;
     esp_systimer_set_irqs(s);
 
-    /* Check if we have to reload the comparator's timer */
+    /* In period mode, the next alarm is one period after this one's counter value,
+     * however late this one was delivered. */
     if (counter->enabled && comparator->period_mode) {
-        /**
-         * If the timer is periodic, we have to compensate the delay that may have been taken
-         * by QEMU framework. Indeed, this timer may have been triggered too late (tenth of us)
-         * As such, compensate here by triggering the next timer earlier.
-         */
-        const int64_t diff_ns = now - comparator->expire_time;
-        const int64_t target_ns = now + TICKS_TO_NS(comparator->period);
-        int64_t adjusted_target_ns = target_ns;
-
-        if (diff_ns < target_ns) {
-            adjusted_target_ns = target_ns - diff_ns;
+        comparator->period_target += comparator->period;
+        if (comparator->period_target <= counter->value) {
+            comparator->period_target = counter->value + comparator->period;
         }
-
-        comparator->expire_time = adjusted_target_ns;
-        timer_mod_ns(&comparator->qtimer, adjusted_target_ns);
+        const int64_t target_ns = now + esp_systimer_ticks_to_ns(counter,
+                                                                 comparator->period_target - counter->value);
+        comparator->expire_time = target_ns;
+        timer_mod_ns(&comparator->qtimer, target_ns);
     }
 }
 
@@ -110,15 +114,15 @@ static void esp_systimer_comparator_reprogram(ESPSysTimerComp* comparator)
     ESPSysTimerState *s = comparator->systimer;
     ESPSysTimerCounter* counter = &s->counter[counter_idx];
 
-    /* Update the counter to get the latest value */
-    esp_systimer_update_counter(counter);
-
     /* If the counter we have to compare it to is not enabled, do not program any timer */
     if (!counter->enabled) {
         /* "Disable" the timer */
         timer_del(&comparator->qtimer);
         return;
     }
+
+    /* Update the counter to get the latest value */
+    esp_systimer_update_counter(counter);
 
     /**
      * According to the TRM, if the comparator (alarm) is smaller than the counter value and the
@@ -140,6 +144,7 @@ static void esp_systimer_comparator_reprogram(ESPSysTimerComp* comparator)
 
     if (comparator->period_mode) {
         diff = comparator->period;
+        comparator->period_target = count_val + diff;
     } else if (overflow_valid) {
         diff = ((ESP_SYSTIMER_52BIT_MASK + 1) - count_val) + alarm;
     } else {
@@ -148,7 +153,7 @@ static void esp_systimer_comparator_reprogram(ESPSysTimerComp* comparator)
 
     /* Calculate the number of ns the counter will take to reach the absolute count */
     const int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-    const int64_t target_ns = now + TICKS_TO_NS(diff);
+    const int64_t target_ns = now + esp_systimer_ticks_to_ns(counter, diff);
     comparator->expire_time = target_ns;
     timer_mod_ns(&comparator->qtimer, target_ns);
 }
@@ -378,6 +383,12 @@ static void esp_systimer_conf_set(ESPSysTimerState *s, uint64_t value)
 
     for (int i = 0; i < ESP_SYSTIMER_COUNTER_COUNT; i++) {
         state_counter[i] = s->counter[i].enabled;
+        /* A stopping counter keeps what it counted; a starting one counts from now */
+        if (s->counter[i].enabled) {
+            esp_systimer_update_counter(&s->counter[i]);
+        } else {
+            s->counter[i].base = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+        }
     }
     s->counter[0].enabled = (value & R_SYSTIMER_CONF_TIMER_UNIT0_WORK_EN_MASK) ? 1 : 0;
     s->counter[1].enabled = (value & R_SYSTIMER_CONF_TIMER_UNIT1_WORK_EN_MASK) ? 1 : 0;
