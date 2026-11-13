@@ -269,6 +269,10 @@ static void set_interrupt(Esp32WifiState *s,int e) {
 }
 
 void Esp32_WLAN_frame_delivered(Esp32WifiState *s){
+    if (s->frame_delivered) {
+        s->frame_delivered(s);
+        return;
+    }
     s->raw_interrupt |= 0x80;
     qemu_set_irq(s->irq, 1);
 }
@@ -319,6 +323,10 @@ static int match_mac_address(uint8_t *a1,uint8_t *a2) {
 }
 // frame from ap to esp32
 void Esp32_sendFrame(Esp32WifiState *s, mac80211_frame *frame,int length, int signal_strength) {
+    if (s->send_frame) {
+        s->send_frame(s, frame, length, signal_strength);
+        return;
+    }
     if(s->dma_inlink_address==0) return;
     uint8_t *header=malloc(sizeof(wifi_pkt_rx_ctrl_t)+length);
     memset(header,0,sizeof(wifi_pkt_rx_ctrl_t)+length);

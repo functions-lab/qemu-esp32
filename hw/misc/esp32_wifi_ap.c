@@ -66,10 +66,17 @@
 access_point_info access_points[]={
     {"PICSimLabWifi",1,-25,{0x10,0x01,0x00,0xc4,0x0a,0x56}},
     {"Espressif",5,-30,{0x10,0x01,0x00,0xc4,0x0a,0x51}},
-    {"MasseyWifi",10,-40,{0x10,0x01,0x00,0xc4,0x0a,0x52}}
+    {"MasseyWifi",10,-40,{0x10,0x01,0x00,0xc4,0x0a,0x52}},
+    {"Velxio-GUEST",6,-20,{0x10,0x01,0x00,0xc4,0x0a,0x57}}
 };
 
-int nb_aps=sizeof(access_points)/sizeof(access_point_info);
+/* The last access point is on the air only for the ESP32-S3 machine */
+int nb_aps=sizeof(access_points)/sizeof(access_point_info)-1;
+
+void Esp32_WLAN_enable_guest_ap(void)
+{
+    nb_aps=sizeof(access_points)/sizeof(access_point_info);
+}
 
 /* The access points can be switched off, as a router is when it restarts: while
  * the property access-points-off is set, they send no beacons and answer

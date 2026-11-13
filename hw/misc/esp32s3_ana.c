@@ -4,7 +4,7 @@
  * The internal I2C master the ROM's regi2c functions use to program the
  * BBPLL and other analog blocks. The analog blocks are not modeled: their
  * registers hold what was written, and BBPLL and PHY calibrations complete at
- * once.
+ * once. The WiFi radio's channel follows the RF PLL frequency the PHY sets.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -15,6 +15,7 @@
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_ana.h"
+#include "esp32_wlan.h"
 
 /* I2C0_CTRL and I2C1_CTRL share one layout: one analog register access each */
 REG32(I2C0_CTRL, 0x00)
@@ -29,9 +30,23 @@ REG32(I2C_MST_ANA_CONF0, 0x40)
 REG32(I2C_MST_ANA_CONF2, 0x4C)
 REG32(I2C_MST_STATUS, 0x50)
 REG32(I2C_MST_CAL_STATUS, 0xC0)
+REG32(RF_PLL_FREQ, 0x150)
+    FIELD(RF_PLL_FREQ, MHZ_ABOVE_2400, 20, 8)
 
 /* Analog calibration status bits the PHY waits for */
 #define ANA_STATUS_DONE 0x07000000
+
+/* Channel n is 2407 + 5n MHz, channel 14 2484 MHz; 0 is off every channel */
+static int wifi_channel(uint32_t mhz_above_2400)
+{
+    if (mhz_above_2400 == 84) {
+        return 14;
+    }
+    if (mhz_above_2400 >= 12 && mhz_above_2400 <= 72 && (mhz_above_2400 - 7) % 5 == 0) {
+        return (mhz_above_2400 - 7) / 5;
+    }
+    return 0;
+}
 
 static uint64_t esp32s3_ana_read(void *opaque, hwaddr addr, unsigned int size)
 {
@@ -62,6 +77,9 @@ static void esp32s3_ana_write(void *opaque, hwaddr addr, uint64_t value, unsigne
             value = FIELD_DP32(value, I2C_CTRL, DATA, *reg);
         }
         value = FIELD_DP32(value, I2C_CTRL, BUSY, 0);
+    }
+    if (addr == A_RF_PLL_FREQ) {
+        esp32_wifi_channel = wifi_channel(FIELD_EX32(value, RF_PLL_FREQ, MHZ_ABOVE_2400));
     }
     s->regs[addr / 4] = value;
 }
