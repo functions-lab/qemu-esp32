@@ -1,85 +1,86 @@
 #pragma once
 
-#include "esp32_uart.h"
-
+#include "hw/sysbus.h"
+#include "hw/registerfields.h"
+#include "chardev/char-fe.h"
+#include "qemu/fifo8.h"
+#include "qemu/timer.h"
 
 #define TYPE_ESP32S3_UART "esp32s3_soc.uart"
-/* This macro can be used to "convert" a generic object into a more specific object, here ESP32S3UARTState.
- * For example, it can convert a DeviceState to a ESP32S3UARTState */
 #define ESP32S3_UART(obj) OBJECT_CHECK(ESP32S3UARTState, (obj), TYPE_ESP32S3_UART)
-/* This one can be used to get the class of a given object.
- * For example, it can give the ESP32UARTClass type structure out of a DeviceState or a
- * ESP32S3UARTState structure. */
-#define ESP32S3_UART_GET_CLASS(obj) OBJECT_GET_CLASS(ESP32S3UARTClass, obj, TYPE_ESP32S3_UART)
-/* Finally, this macro is used to convert a generic class to ESP32S3UARTClass.
- * For example, it can be used to convert an ObjectClass to a ESP32S3UARTClass*/
-#define ESP32S3_UART_CLASS(klass) OBJECT_CLASS_CHECK(ESP32S3UARTClass, klass, TYPE_ESP32S3_UART)
+
+#define ESP32S3_UART_FIFO_LENGTH 128
+
+REG32(UART_FIFO, 0x00)
+REG32(UART_INT_RAW, 0x04)
+    FIELD(UART_INT, RXFIFO_FULL, 0, 1)
+    FIELD(UART_INT, TXFIFO_EMPTY, 1, 1)
+    FIELD(UART_INT, RXFIFO_OVF, 4, 1)
+    FIELD(UART_INT, RXFIFO_TOUT, 8, 1)
+    FIELD(UART_INT, TX_DONE, 14, 1)
+REG32(UART_INT_ST, 0x08)
+REG32(UART_INT_ENA, 0x0C)
+REG32(UART_INT_CLR, 0x10)
+REG32(UART_CLKDIV, 0x14)
+    FIELD(UART_CLKDIV, CLKDIV, 0, 12)
+    FIELD(UART_CLKDIV, FRAG, 20, 4)
+REG32(UART_STATUS, 0x1C)
+    FIELD(UART_STATUS, RXFIFO_CNT, 0, 10)
+    FIELD(UART_STATUS, DSRN, 13, 1)
+    FIELD(UART_STATUS, CTSN, 14, 1)
+    FIELD(UART_STATUS, RXD, 15, 1)
+    FIELD(UART_STATUS, TXFIFO_CNT, 16, 10)
+    FIELD(UART_STATUS, DTRN, 29, 1)
+    FIELD(UART_STATUS, RTSN, 30, 1)
+    FIELD(UART_STATUS, TXD, 31, 1)
+REG32(UART_CONF0, 0x20)
+    FIELD(UART_CONF0, BIT_NUM, 2, 2)
+    FIELD(UART_CONF0, STOP_BIT_NUM, 4, 2)
+    FIELD(UART_CONF0, LOOPBACK, 14, 1)
+    FIELD(UART_CONF0, RXFIFO_RST, 17, 1)
+    FIELD(UART_CONF0, TXFIFO_RST, 18, 1)
+    FIELD(UART_CONF0, MEM_CLK_EN, 28, 1)
+REG32(UART_CONF1, 0x24)
+    FIELD(UART_CONF1, RXFIFO_FULL_THRHD, 0, 10)
+    FIELD(UART_CONF1, TXFIFO_EMPTY_THRHD, 10, 10)
+    FIELD(UART_CONF1, RX_TOUT_EN, 23, 1)
+REG32(UART_LOWPULSE, 0x28)
+REG32(UART_HIGHPULSE, 0x2C)
+REG32(UART_MEM_CONF, 0x60)
+    FIELD(UART_MEM_CONF, RX_SIZE, 1, 3)
+    FIELD(UART_MEM_CONF, TX_SIZE, 4, 3)
+    FIELD(UART_MEM_CONF, RX_TOUT_THRHD, 17, 10)
+REG32(UART_MEM_TX_STATUS, 0x64)
+REG32(UART_MEM_RX_STATUS, 0x68)
+    FIELD(UART_MEM_RX_STATUS, APB_RX_RADDR, 0, 10)
+    FIELD(UART_MEM_RX_STATUS, RX_WADDR, 11, 10)
+REG32(UART_FSM_STATUS, 0x6C)
+REG32(UART_POSPULSE, 0x70)
+REG32(UART_NEGPULSE, 0x74)
+REG32(UART_CLK_CONF, 0x78)
+    FIELD(UART_CLK_CONF, SCLK_DIV_NUM, 12, 8)
+    FIELD(UART_CLK_CONF, SCLK_SEL, 20, 2)
+REG32(UART_DATE, 0x7C)
+REG32(UART_ID, 0x80)
+    FIELD(UART_ID, REG_UPDATE, 31, 1)
+
+#define ESP32S3_UART_REG_COUNT (A_UART_ID / 4 + 1)
 
 typedef struct ESP32S3UARTState {
-    ESP32UARTState parent;
+    SysBusDevice parent_obj;
 
-    uint32_t conf1;
+    MemoryRegion iomem;
+    qemu_irq irq;
+    CharBackend chr;
+    uint8_t index;
+
+    uint32_t reg[ESP32S3_UART_REG_COUNT];
+    Fifo8 rx_fifo;
+    /* Bytes ever pushed into / popped from the RX FIFO, for MEM_RX_STATUS */
+    uint32_t rx_pushed;
+    uint32_t rx_popped;
+    QEMUTimer rx_timeout_timer;
 } ESP32S3UARTState;
 
-typedef struct ESP32S3UARTClass {
-    ESP32UARTClass parent_class;
-
-    /* These function pointers will be during class init, they will be populated
-     * by device_class_set_parent_* functions. They can then be called in the
-     * respective class methods: realize. */
-    DeviceRealize parent_realize;
-
-    /* Virtual attributes/methods overriden */
-    void (*parent_uart_write)(void *opaque, hwaddr addr, uint64_t value, unsigned int size);
-    uint64_t (*parent_uart_read)(void *opaque, hwaddr addr, unsigned int size);
-} ESP32S3UARTClass;
-
-
-/**
- * Define the ESP32-S3 specific registers, or the ones that saw their address or fields
- * changed from the ESP32 UART
- */
-REG32(ESP32S3_UART_CONF0, 0x20)
-    FIELD(ESP32S3_UART_CONF0, MEM_CLK_EN, 28, 1)
-    FIELD(ESP32S3_UART_CONF0, AUTOBAUD_EN, 27, 1)
-    FIELD(ESP32S3_UART_CONF0, ERR_WR_MASK, 26, 1)
-    FIELD(ESP32S3_UART_CONF0, CLK_EN, 25, 1)
-    FIELD(ESP32S3_UART_CONF0, DTR_INV, 24, 1)
-    FIELD(ESP32S3_UART_CONF0, RTS_INV, 23, 1)
-    FIELD(ESP32S3_UART_CONF0, TXD_INV, 22, 1)
-    FIELD(ESP32S3_UART_CONF0, DSR_INV, 21, 1)
-    FIELD(ESP32S3_UART_CONF0, CTS_INV, 20, 1)
-    FIELD(ESP32S3_UART_CONF0, RXD_INV, 19, 1)
-    FIELD(ESP32S3_UART_CONF0, TXFIFO_RST, 18, 1)
-    FIELD(ESP32S3_UART_CONF0, RXFIFO_RST, 17, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_EN, 16, 1)
-    FIELD(ESP32S3_UART_CONF0, TX_FLOW_EN, 15, 1)
-    FIELD(ESP32S3_UART_CONF0, LOOPBACK, 14, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_RX_INV, 13, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_TX_INV, 12, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_WCTL, 11, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_TX_EN, 10, 1)
-    FIELD(ESP32S3_UART_CONF0, IRDA_DPLX, 9, 1)
-    FIELD(ESP32S3_UART_CONF0, TXD_BRK, 8, 1)
-    FIELD(ESP32S3_UART_CONF0, SW_DTR, 7, 1)
-    FIELD(ESP32S3_UART_CONF0, SW_RTS, 6, 1)
-    FIELD(ESP32S3_UART_CONF0, STOP_BIT_NUM, 4, 2)
-    FIELD(ESP32S3_UART_CONF0, BIT_NUM, 2, 2)
-    FIELD(ESP32S3_UART_CONF0, PARITY_EN, 1, 1)
-    FIELD(ESP32S3_UART_CONF0, PARITY, 0, 1)
-
-REG32(ESP32S3_UART_CONF1, 0x24)
-    FIELD(ESP32S3_UART_CONF1, RX_TOUT_EN, 23, 1)
-    FIELD(ESP32S3_UART_CONF1, RX_FLOW_EN, 22, 1)
-    FIELD(ESP32S3_UART_CONF1, RX_TOUT_FLOW_DIS, 21, 1)
-    FIELD(ESP32S3_UART_CONF1, DIS_RX_DAT_OVF, 20, 1)
-    FIELD(ESP32S3_UART_CONF1, TXFIFO_EMPTY_THRHD, 10, 10)
-    FIELD(ESP32S3_UART_CONF1, RXFIFO_FULL_THRHD, 0, 10)
-
-REG32(ESP32S3_UART_MEM_CONF, 0x60)
-    FIELD(ESP32S3_UART_MEM_CONF, MEM_FORCE_PU, 28, 1)
-    FIELD(ESP32S3_UART_MEM_CONF, MEM_FORCE_PD, 27, 1)
-    FIELD(ESP32S3_UART_MEM_CONF, RX_TOUT_THRHD, 17, 10)
-    FIELD(ESP32S3_UART_MEM_CONF, RX_FLOW_THRHD, 7, 9)
-    FIELD(ESP32S3_UART_MEM_CONF, TX_SIZE, 4, 3)
-    FIELD(ESP32S3_UART_MEM_CONF, RX_SIZE, 1, 3)
+/* A byte arriving on RXD, as from the host's wire; lost if the RX FIFO is full */
+void esp32s3_uart_receive_byte(ESP32S3UARTState *s, uint8_t byte);
