@@ -9,7 +9,7 @@
  * Modeled: single-line modes 0-3, whose clock edges leave the bytes as they
  * are, and 3-wire half duplex; MSB or LSB first, which the host sees as the
  * bit-reversed byte; command / address / dummy phases of whole bytes, full and
- * half duplex, data through W0-W15 or GDMA, and the
+ * half duplex, data through W0-W15 (or W8-W15 alone) or GDMA, and the
  * TRANS_DONE interrupt. Anything else is rejected.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -85,6 +85,8 @@ REG32(DATE, 0xF0)
 
 #define GPSPI_DATE_VALUE    0x2101040
 #define GPSPI_BUF_BYTES     64
+/* USR_MOSI_HIGHPART / USR_MISO_HIGHPART: data in W8-W15 only */
+#define GPSPI_HIGHPART      32
 #define GPSPI_INT_MASK      0x1FFFFF
 #define MOSI_IDLE           0xFF
 
@@ -146,10 +148,6 @@ static bool check_supported(ESP32S3GpspiState *s)
         reject(s, "full duplex in 3-wire (SIO) mode");
         return false;
     }
-    if (FIELD_EX32(user, USER, USR_MOSI_HIGHPART) || FIELD_EX32(user, USER, USR_MISO_HIGHPART)) {
-        reject(s, "W8-W15 high-part buffer");
-        return false;
-    }
     return true;
 }
 
@@ -161,6 +159,17 @@ static bool whole_bytes(ESP32S3GpspiState *s, const char *phase, uint32_t bits, 
         return false;
     }
     *bytes = bits / 8;
+    return true;
+}
+
+/* Data buffer of a CPU transfer: W0-W15, or W8-W15 for the high part */
+static bool buf_window(ESP32S3GpspiState *s, bool highpart, uint32_t len, uint32_t *base)
+{
+    *base = highpart ? GPSPI_HIGHPART : 0;
+    if (len > GPSPI_BUF_BYTES - *base) {
+        reject(s, highpart ? "CPU-buffer transfer over 32 bytes in W8-W15" : "CPU-buffer transfer over 64 bytes");
+        return false;
+    }
     return true;
 }
 
@@ -194,15 +203,14 @@ static bool gdma_channel(ESP32S3GpspiState *s, int dir, uint32_t *chan)
 /* Returns false when the transfer was rejected */
 static bool fetch_mosi(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
 {
-    uint32_t chan;
+    uint32_t chan, base;
 
     if (!FIELD_EX32(s->regs[R_DMA_CONF], DMA_CONF, DMA_TX_ENA)) {
-        if (len > GPSPI_BUF_BYTES) {
-            reject(s, "CPU-buffer transfer over 64 bytes");
+        if (!buf_window(s, FIELD_EX32(s->regs[R_USER], USER, USR_MOSI_HIGHPART), len, &base)) {
             return false;
         }
         for (uint32_t i = 0; i < len; i++) {
-            data[i] = buf_byte(s, i);
+            data[i] = buf_byte(s, base + i);
         }
     } else if (gdma_channel(s, ESP_GDMA_OUT_IDX, &chan)) {
         if (!esp_gdma_read_channel(s->gdma, chan, data, len)) {
@@ -218,15 +226,14 @@ static bool fetch_mosi(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
 
 static void store_miso(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
 {
-    uint32_t chan;
+    uint32_t chan, base;
 
     if (!FIELD_EX32(s->regs[R_DMA_CONF], DMA_CONF, DMA_RX_ENA)) {
-        if (len > GPSPI_BUF_BYTES) {
-            reject(s, "CPU-buffer transfer over 64 bytes");
+        if (!buf_window(s, FIELD_EX32(s->regs[R_USER], USER, USR_MISO_HIGHPART), len, &base)) {
             return;
         }
         for (uint32_t i = 0; i < len; i++) {
-            set_buf_byte(s, i, data[i]);
+            set_buf_byte(s, base + i, data[i]);
         }
     } else if (!gdma_channel(s, ESP_GDMA_IN_IDX, &chan) || !esp_gdma_write_channel(s->gdma, chan, data, len)) {
         picsimlab_reject("esp32s3_gpspi%d: no GDMA in channel took %u bytes", s->bus, len);
