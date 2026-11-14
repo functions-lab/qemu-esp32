@@ -7,7 +7,9 @@
  * the host sees FINISH only at a STOP, or when a NACK the command did not
  * expect aborts the transaction (the controller then generates the STOP).
  * Address bytes are sent as queued: the controller does not interpret 10-bit
- * address prefixes.
+ * address prefixes. LSB-first bytes reach the host bit-reversed, as an
+ * MSB-first slave would read them. A write to the full TX FIFO is dropped
+ * and raises TXFIFO_OVF.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -16,6 +18,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/host-utils.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
@@ -56,6 +59,7 @@ REG32(INT_RAW, 0x20)
     FIELD(INT, TRANS_COMPLETE, 7, 1)
     FIELD(INT, TRANS_START, 9, 1)
     FIELD(INT, NACK, 10, 1)
+    FIELD(INT, TXFIFO_OVF, 11, 1)
 REG32(INT_CLR, 0x24)
 REG32(INT_ENA, 0x28)
 REG32(INT_STATUS, 0x2C)
@@ -136,6 +140,9 @@ static void rx_fifo_reset(ESP32S3I2CState *s)
 /* Sends one byte; returns the ACK bit the slave answered (0 = ACK) */
 static int write_byte(ESP32S3I2CState *s, uint8_t byte)
 {
+    if (FIELD_EX32(s->regs[R_CTR], CTR, TX_LSB_FIRST)) {
+        byte = revbit8(byte);
+    }
     if (s->expect_addr) {
         s->expect_addr = false;
         s->addr = byte >> 1;
@@ -158,7 +165,7 @@ static uint8_t read_byte(ESP32S3I2CState *s, bool master_nack)
     if (master_nack && s->slave_engaged) {
         host_event(s, PICSIMLAB_I2C_NACK);
     }
-    return byte;
+    return FIELD_EX32(s->regs[R_CTR], CTR, RX_LSB_FIRST) ? revbit8(byte) : byte;
 }
 
 /* Runs one command; returns false when the command list stops here or was rejected */
@@ -229,9 +236,8 @@ static void trans_start(ESP32S3I2CState *s)
         picsimlab_reject("esp32s3_i2c%d: slave mode is not modeled", s->bus);
         return;
     }
-    if (FIELD_EX32(ctr, CTR, TX_LSB_FIRST) || FIELD_EX32(ctr, CTR, RX_LSB_FIRST) ||
-        FIELD_EX32(s->regs[R_FIFO_CONF], FIFO_CONF, NONFIFO_EN)) {
-        picsimlab_reject("esp32s3_i2c%d: LSB-first and non-FIFO modes are not modeled", s->bus);
+    if (FIELD_EX32(s->regs[R_FIFO_CONF], FIFO_CONF, NONFIFO_EN)) {
+        picsimlab_reject("esp32s3_i2c%d: non-FIFO mode is not modeled", s->bus);
         return;
     }
     s->int_raw |= R_INT_TRANS_START_MASK;
@@ -312,8 +318,8 @@ static void esp32s3_i2c_write(void *opaque, hwaddr addr, uint64_t value, unsigne
         break;
     case A_DATA:
         if (fifo8_is_full(&s->tx_fifo)) {
-            picsimlab_reject("esp32s3_i2c%d: a write to the full TX FIFO is not modeled", s->bus);
-            return;
+            s->int_raw |= R_INT_TXFIFO_OVF_MASK;
+            break;
         }
         fifo8_push(&s->tx_fifo, value & 0xFF);
         s->tx_pushed++;
