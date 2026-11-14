@@ -6,8 +6,10 @@
  * the MISO byte; write-only transactions go to the host in one batch. Chip
  * selects are reported as lane levels on the CS outputs.
  *
- * Modeled: single-line mode 0, MSB first, command / address / dummy phases
- * of whole bytes, full and half duplex, data through W0-W15 or GDMA, and the
+ * Modeled: single-line modes 0-3, whose clock edges leave the bytes as they
+ * are, and 3-wire half duplex; MSB or LSB first, which the host sees as the
+ * bit-reversed byte; command / address / dummy phases of whole bytes, full and
+ * half duplex, data through W0-W15 or GDMA, and the
  * TRANS_DONE interrupt. Anything else is rejected.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -16,6 +18,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/host-utils.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
@@ -130,12 +133,8 @@ static bool check_supported(ESP32S3GpspiState *s)
         reject(s, "segmented transfer");
         return false;
     }
-    if (FIELD_EX32(s->regs[R_MISC], MISC, CK_IDLE_EDGE) || FIELD_EX32(user, USER, CK_OUT_EDGE)) {
-        reject(s, "SPI mode other than 0");
-        return false;
-    }
-    if (FIELD_EX32(s->regs[R_CTRL], CTRL, RD_BIT_ORDER) || FIELD_EX32(s->regs[R_CTRL], CTRL, WR_BIT_ORDER)) {
-        reject(s, "LSB-first bit order");
+    if (FIELD_EX32(s->regs[R_CTRL], CTRL, RD_BIT_ORDER) > 1 || FIELD_EX32(s->regs[R_CTRL], CTRL, WR_BIT_ORDER) > 1) {
+        reject(s, "a reserved bit order");
         return false;
     }
     if (FIELD_EX32(s->regs[R_CTRL], CTRL, LINES) || FIELD_EX32(user, USER, FWRITE_LINES) ||
@@ -143,8 +142,8 @@ static bool check_supported(ESP32S3GpspiState *s)
         reject(s, "dual, quad or octal line mode");
         return false;
     }
-    if (FIELD_EX32(user, USER, SIO)) {
-        reject(s, "3-wire (SIO) mode");
+    if (FIELD_EX32(user, USER, SIO) && FIELD_EX32(user, USER, DOUTDIN)) {
+        reject(s, "full duplex in 3-wire (SIO) mode");
         return false;
     }
     if (FIELD_EX32(user, USER, USR_MOSI_HIGHPART) || FIELD_EX32(user, USER, USR_MISO_HIGHPART)) {
@@ -243,6 +242,9 @@ static void run_transaction(ESP32S3GpspiState *s)
     uint32_t cmd_len = 0, addr_len = 0, dummy_len = 0;
     uint32_t data_len = 0;
 
+    bool lsb_out = FIELD_EX32(s->regs[R_CTRL], CTRL, WR_BIT_ORDER);
+    bool lsb_in = FIELD_EX32(s->regs[R_CTRL], CTRL, RD_BIT_ORDER);
+
     if (!check_supported(s)) {
         return;
     }
@@ -294,6 +296,12 @@ static void run_transaction(ESP32S3GpspiState *s)
     }
     pos += dout_len;
     memset(out + pos, MOSI_IDLE, din_len);
+    /* An LSB-first byte is, to an MSB-first slave, the byte bit-reversed */
+    if (lsb_out) {
+        for (uint32_t i = 0; i < total; i++) {
+            out[i] = revbit8(out[i]);
+        }
+    }
 
     uint8_t lanes = selected_lanes(s);
     set_lanes(s, s->cs_held & ~lanes, false);
@@ -308,7 +316,7 @@ static void run_transaction(ESP32S3GpspiState *s)
         for (uint32_t i = 0; i < total; i++) {
             uint8_t answer = picsimlab_spi_event(s->bus, out[i] << 8);
             if (i >= capture_at && i < capture_at + data_len) {
-                in[i - capture_at] = answer;
+                in[i - capture_at] = lsb_in ? revbit8(answer) : answer;
             }
         }
         store_miso(s, in, data_len);
