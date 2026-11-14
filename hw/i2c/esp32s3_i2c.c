@@ -6,6 +6,8 @@
  * repeated START begins a new address phase without ending the transaction;
  * the host sees FINISH only at a STOP, or when a NACK the command did not
  * expect aborts the transaction (the controller then generates the STOP).
+ * Address bytes are sent as queued: the controller does not interpret 10-bit
+ * address prefixes.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -136,10 +138,6 @@ static void rx_fifo_reset(ESP32S3I2CState *s)
 static int write_byte(ESP32S3I2CState *s, uint8_t byte)
 {
     if (s->expect_addr) {
-        if ((byte >> 3) == 0x1E) {
-            error_report("esp32s3_i2c%d: 10-bit addressing is not modeled", s->bus);
-            abort();
-        }
         s->expect_addr = false;
         s->addr = byte >> 1;
         int nack = host_event(s, (byte & 1) ? PICSIMLAB_I2C_START_RECV : PICSIMLAB_I2C_START_SEND) != 0;
