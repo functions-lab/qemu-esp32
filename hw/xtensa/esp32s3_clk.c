@@ -21,6 +21,7 @@
 #include "hw/xtensa/esp32s3_clk_defs.h"
 #include "hw/core/cpu.h"
 #include "target/xtensa/cpu.h"
+#include "hw/xtensa/picsimlab.h"
 
 #define CLOCK_DEBUG      0
 #define CLOCK_WARNING    0
@@ -28,6 +29,7 @@
 #define XTAL_CLK_HZ     40000000
 #define RC_FAST_CLK_HZ  17500000
 
+/* Returns 0 when the clock selection was rejected */
 static uint32_t esp32s3_cpu_freq_hz(ESP32S3ClockState *s)
 {
     const uint32_t pre_div = FIELD_EX32(s->sysclk, SYSTEM_SYSCLK_CONF, PRE_DIV_CNT) + 1;
@@ -46,12 +48,12 @@ static uint32_t esp32s3_cpu_freq_hz(ESP32S3ClockState *s)
         case ESP32S3_PERIOD_SEL_240:
             return 240000000;
         default:
-            error_report("esp32s3.clock: reserved SYSTEM_CPUPERIOD_SEL value");
-            abort();
+            picsimlab_reject("esp32s3.clock: the reserved SYSTEM_CPUPERIOD_SEL value 3 is not modeled");
+            return 0;
         }
     default:
-        error_report("esp32s3.clock: reserved SYSTEM_SOC_CLK_SEL value");
-        abort();
+        picsimlab_reject("esp32s3.clock: the reserved SYSTEM_SOC_CLK_SEL value 3 is not modeled");
+        return 0;
     }
 }
 
@@ -64,6 +66,10 @@ static void esp32s3_clock_apply_cpu_freq(ESP32S3ClockState *s)
 {
     const uint32_t hz = esp32s3_cpu_freq_hz(s);
     CPUState *cs;
+
+    if (hz == 0) {
+        return;
+    }
 
     CPU_FOREACH(cs) {
         XtensaCPU *cpu = XTENSA_CPU(cs);

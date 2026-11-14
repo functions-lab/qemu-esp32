@@ -8,6 +8,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/error-report.h"
+#include "sysemu/runstate.h"
 #include "hw/xtensa/picsimlab.h"
 
 /* The host's callback table, field for field. */
@@ -21,6 +22,7 @@ typedef struct {
     void (*gpio_matrix_cb)(int gpio, int signal);
     void (*rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value);
     void (*spi_event_batch)(const uint8_t id, const uint8_t *mosi, int len);
+    void (*reject_event)(const char *message);
 } callbacks_t;
 
 static void no_pin(int pin, int value) {}
@@ -40,6 +42,8 @@ const short int *picsimlab_pinmap;
 void (*picsimlab_gpio_matrix_cb)(int gpio, int signal) = no_matrix;
 void (*picsimlab_rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value) = no_rmt;
 void (*picsimlab_spi_event_batch)(const uint8_t id, const uint8_t *mosi, int len) = no_spi_batch;
+static void (*picsimlab_reject_event)(const char *message);
+static bool rejected;
 
 static const PicsimlabBoard *board;
 
@@ -71,6 +75,26 @@ void qemu_picsimlab_register_callbacks(void *arg)
     picsimlab_gpio_matrix_cb = callbacks->gpio_matrix_cb;
     picsimlab_rmt_event = callbacks->rmt_event;
     picsimlab_spi_event_batch = callbacks->spi_event_batch;
+    picsimlab_reject_event = callbacks->reject_event;
+}
+
+void picsimlab_reject(const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+    g_autofree char *message = g_strdup_vprintf(fmt, ap);
+    va_end(ap);
+    if (!picsimlab_reject_event) {
+        error_report("%s", message);
+        abort();
+    }
+    if (rejected) {
+        return;
+    }
+    rejected = true;
+    picsimlab_reject_event(message);
+    vm_stop(RUN_STATE_INTERNAL_ERROR);
 }
 
 void qemu_picsimlab_set_pin(int pin, int value)

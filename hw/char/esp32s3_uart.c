@@ -15,7 +15,6 @@
 #include "qemu/osdep.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-#include "qemu/error-report.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
@@ -45,18 +44,20 @@ static uint64_t sclk_hz(ESP32S3UARTState *s)
     }
 }
 
-static uint64_t bit_ns(ESP32S3UARTState *s)
+/* Returns false when the divider was rejected */
+static bool bit_ns(ESP32S3UARTState *s, uint64_t *ns)
 {
     uint32_t clkdiv = s->reg[R_UART_CLKDIV];
     uint64_t div16 = (FIELD_EX32(clkdiv, UART_CLKDIV, CLKDIV) << 4) | FIELD_EX32(clkdiv, UART_CLKDIV, FRAG);
     uint64_t div_num = FIELD_EX32(s->reg[R_UART_CLK_CONF], UART_CLK_CONF, SCLK_DIV_NUM) + 1;
 
     if (div16 == 0) {
-        error_report("esp32s3_uart%d: CLKDIV of 0 gives no baud rate", s->index);
-        abort();
+        picsimlab_reject("esp32s3_uart%d: a CLKDIV of 0, which gives no baud rate, is not modeled", s->index);
+        return false;
     }
     /* bit time = (CLKDIV + FRAG/16) * (SCLK_DIV_NUM + 1) / SCLK */
-    return div16 * div_num * NANOSECONDS_PER_SECOND / (sclk_hz(s) << 4);
+    *ns = div16 * div_num * NANOSECONDS_PER_SECOND / (sclk_hz(s) << 4);
+    return true;
 }
 
 static void update_irq(ESP32S3UARTState *s)
@@ -78,12 +79,16 @@ static void update_irq(ESP32S3UARTState *s)
 static void arm_rx_timeout(ESP32S3UARTState *s)
 {
     uint32_t thrhd = FIELD_EX32(s->reg[R_UART_MEM_CONF], UART_MEM_CONF, RX_TOUT_THRHD);
+    uint64_t bit;
 
     if (!FIELD_EX32(s->reg[R_UART_CONF1], UART_CONF1, RX_TOUT_EN) || thrhd == 0) {
         timer_del(&s->rx_timeout_timer);
         return;
     }
-    timer_mod(&s->rx_timeout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + thrhd * bit_ns(s));
+    if (!bit_ns(s, &bit)) {
+        return;
+    }
+    timer_mod(&s->rx_timeout_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + thrhd * bit);
 }
 
 static void rx_timeout_cb(void *opaque)

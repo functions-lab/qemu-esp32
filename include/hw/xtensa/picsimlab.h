@@ -34,6 +34,13 @@ extern void (*picsimlab_gpio_matrix_cb)(int gpio, int signal);
 extern void (*picsimlab_rmt_event)(const uint8_t channel, const uint32_t config0, const uint32_t value);
 extern void (*picsimlab_spi_event_batch)(const uint8_t id, const uint8_t *mosi, int len);
 
+/*
+ * The firmware asked the hardware for an operation no model covers: the host
+ * fails the run with this message and the guest stops. The caller leaves its
+ * device unchanged and returns. Only the first rejection is reported.
+ */
+void picsimlab_reject(const char *fmt, ...) G_GNUC_PRINTF(1, 2);
+
 /* picsimlab_dir_pin(-1, value) codes */
 #define PICSIMLAB_SYNC_GPIO_IN  (-1)
 #define PICSIMLAB_SYNC_LEDC     0x5000

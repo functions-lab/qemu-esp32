@@ -16,7 +16,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
-#include "qemu/error-report.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "hw/qdev-properties.h"
@@ -162,7 +161,7 @@ static uint8_t read_byte(ESP32S3I2CState *s, bool master_nack)
     return byte;
 }
 
-/* Runs one command; returns false when the command list stops here */
+/* Runs one command; returns false when the command list stops here or was rejected */
 static bool run_command(ESP32S3I2CState *s, int index)
 {
     uint32_t cmd = s->regs[R_COMD0 + index];
@@ -178,8 +177,8 @@ static bool run_command(ESP32S3I2CState *s, int index)
     case OP_WRITE:
         for (uint32_t i = 0; i < count; i++) {
             if (fifo8_is_empty(&s->tx_fifo)) {
-                error_report("esp32s3_i2c%d: WRITE command with an empty TX FIFO", s->bus);
-                abort();
+                picsimlab_reject("esp32s3_i2c%d: a WRITE command with an empty TX FIFO is not modeled", s->bus);
+                return false;
             }
             uint8_t byte = fifo8_pop(&s->tx_fifo);
             s->tx_popped++;
@@ -196,8 +195,8 @@ static bool run_command(ESP32S3I2CState *s, int index)
     case OP_READ:
         for (uint32_t i = 0; i < count; i++) {
             if (fifo8_is_full(&s->rx_fifo)) {
-                error_report("esp32s3_i2c%d: READ command overflows the RX FIFO", s->bus);
-                abort();
+                picsimlab_reject("esp32s3_i2c%d: a READ command overflowing the RX FIFO is not modeled", s->bus);
+                return false;
             }
             fifo8_push(&s->rx_fifo, read_byte(s, FIELD_EX32(cmd, COMD, ACK_VAL)));
             s->rx_pushed++;
@@ -214,9 +213,9 @@ static bool run_command(ESP32S3I2CState *s, int index)
         more = false;
         break;
     default:
-        error_report("esp32s3_i2c%d: command %d has opcode %d", s->bus, index,
-                     (int)FIELD_EX32(cmd, COMD, OP_CODE));
-        abort();
+        picsimlab_reject("esp32s3_i2c%d: command %d's opcode %d is not modeled", s->bus, index,
+                         (int)FIELD_EX32(cmd, COMD, OP_CODE));
+        return false;
     }
     s->regs[R_COMD0 + index] = FIELD_DP32(cmd, COMD, DONE, 1);
     return more;
@@ -227,13 +226,13 @@ static void trans_start(ESP32S3I2CState *s)
     uint32_t ctr = s->regs[R_CTR];
 
     if (!FIELD_EX32(ctr, CTR, MS_MODE)) {
-        error_report("esp32s3_i2c%d: slave mode is not modeled", s->bus);
-        abort();
+        picsimlab_reject("esp32s3_i2c%d: slave mode is not modeled", s->bus);
+        return;
     }
     if (FIELD_EX32(ctr, CTR, TX_LSB_FIRST) || FIELD_EX32(ctr, CTR, RX_LSB_FIRST) ||
         FIELD_EX32(s->regs[R_FIFO_CONF], FIFO_CONF, NONFIFO_EN)) {
-        error_report("esp32s3_i2c%d: LSB-first and non-FIFO modes are not modeled", s->bus);
-        abort();
+        picsimlab_reject("esp32s3_i2c%d: LSB-first and non-FIFO modes are not modeled", s->bus);
+        return;
     }
     s->int_raw |= R_INT_TRANS_START_MASK;
     for (int i = 0; i < ESP32S3_I2C_CMD_COUNT; i++) {
@@ -242,8 +241,7 @@ static void trans_start(ESP32S3I2CState *s)
             return;
         }
     }
-    error_report("esp32s3_i2c%d: command list without END or STOP", s->bus);
-    abort();
+    picsimlab_reject("esp32s3_i2c%d: a command list without END or STOP is not modeled", s->bus);
 }
 
 static uint64_t esp32s3_i2c_read(void *opaque, hwaddr addr, unsigned int size)
@@ -281,8 +279,8 @@ static uint64_t esp32s3_i2c_read(void *opaque, hwaddr addr, unsigned int size)
         return I2C_DATE_VALUE;
     default:
         if (addr >= 0x100) {
-            error_report("esp32s3_i2c%d: direct FIFO RAM access is not modeled", s->bus);
-            abort();
+            picsimlab_reject("esp32s3_i2c%d: direct FIFO RAM access is not modeled", s->bus);
+            return 0;
         }
         return s->regs[addr / 4];
     }
@@ -314,8 +312,8 @@ static void esp32s3_i2c_write(void *opaque, hwaddr addr, uint64_t value, unsigne
         break;
     case A_DATA:
         if (fifo8_is_full(&s->tx_fifo)) {
-            error_report("esp32s3_i2c%d: write to a full TX FIFO", s->bus);
-            abort();
+            picsimlab_reject("esp32s3_i2c%d: a write to the full TX FIFO is not modeled", s->bus);
+            return;
         }
         fifo8_push(&s->tx_fifo, value & 0xFF);
         s->tx_pushed++;
@@ -338,8 +336,8 @@ static void esp32s3_i2c_write(void *opaque, hwaddr addr, uint64_t value, unsigne
         break;
     default:
         if (addr >= 0x100) {
-            error_report("esp32s3_i2c%d: direct FIFO RAM access is not modeled", s->bus);
-            abort();
+            picsimlab_reject("esp32s3_i2c%d: direct FIFO RAM access is not modeled", s->bus);
+            return;
         }
         s->regs[addr / 4] = value;
         break;

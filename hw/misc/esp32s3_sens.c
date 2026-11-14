@@ -18,6 +18,7 @@
 #include "hw/sysbus.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_sens.h"
+#include "hw/xtensa/picsimlab.h"
 
 REG32(SAR_READER1_CTRL, 0x00)
     FIELD(SAR_READER1_CTRL, SAR1_DATA_INV, 28, 1)
@@ -78,14 +79,14 @@ static void convert(ESP32S3SensState *s, int unit)
     bool invert;
 
     if (pads == 0 || (pads & (pads - 1)) != 0) {
-        error_report("esp32s3_sens: ADC%d conversion with pad map 0x%x; one channel at a time is modeled",
-                     unit, pads);
-        abort();
+        picsimlab_reject("esp32s3_sens: an ADC%d conversion with pad map 0x%x is not modeled; one channel at a time is",
+                         unit, pads);
+        return;
     }
     int channel = ctz32(pads);
     if (channel >= ESP32S3_ADC_UNIT_CHANNELS) {
-        error_report("esp32s3_sens: ADC%d channel %d is not modeled", unit, channel);
-        abort();
+        picsimlab_reject("esp32s3_sens: ADC%d channel %d does not exist", unit, channel);
+        return;
     }
 
     int input = (unit == 1 ? 0 : ESP32S3_ADC_UNIT_CHANNELS) + channel;

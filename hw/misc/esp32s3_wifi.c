@@ -13,7 +13,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/irq.h"
 #include "hw/sysbus.h"
@@ -23,6 +22,7 @@
 #include "hw/misc/esp32s3_wifi.h"
 #include "esp32_wlan.h"
 #include "esp32_wlan_packet.h"
+#include "hw/xtensa/picsimlab.h"
 
 REG32(DMA_IN_STATUS, 0x84)
 REG32(DMA_INLINK, 0x88)
@@ -108,8 +108,8 @@ static void transmit(Esp32WifiState *s, uint32_t outlink)
     address_space_read(&address_space_memory, DRAM_WINDOW | (outlink & 0xFFFFF), MEMTXATTRS_UNSPECIFIED,
                        &item, sizeof(item));
     if (item.length > sizeof(frame)) {
-        error_report("esp32s3_wifi: TX frame of %u bytes", item.length);
-        abort();
+        picsimlab_reject("esp32s3_wifi: a TX frame of %u bytes is not modeled", (unsigned)item.length);
+        return;
     }
     address_space_read(&address_space_memory, item.address, MEMTXATTRS_UNSPECIFIED, &frame, item.length);
     frame.frame_length = item.length;

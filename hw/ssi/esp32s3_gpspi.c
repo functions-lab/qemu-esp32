@@ -8,7 +8,7 @@
  *
  * Modeled: single-line mode 0, MSB first, command / address / dummy phases
  * of whole bytes, full and half duplex, data through W0-W15 or GDMA, and the
- * TRANS_DONE interrupt. Anything else aborts.
+ * TRANS_DONE interrupt. Anything else is rejected.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 or
@@ -16,7 +16,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
@@ -93,8 +92,7 @@ static void update_irq(ESP32S3GpspiState *s)
 
 static void reject(ESP32S3GpspiState *s, const char *what)
 {
-    error_report("esp32s3_gpspi%d: %s is not modeled", s->bus, what);
-    abort();
+    picsimlab_reject("esp32s3_gpspi%d: %s is not modeled", s->bus, what);
 }
 
 static void set_cs(ESP32S3GpspiState *s, int lane, bool active)
@@ -119,41 +117,52 @@ static void set_lanes(ESP32S3GpspiState *s, uint8_t lanes, bool active)
     }
 }
 
-static void check_supported(ESP32S3GpspiState *s)
+/* Returns false when the configuration was rejected */
+static bool check_supported(ESP32S3GpspiState *s)
 {
     uint32_t user = s->regs[R_USER];
 
     if (FIELD_EX32(s->regs[R_SLAVE], SLAVE, SLAVE_MODE)) {
         reject(s, "slave mode");
+        return false;
     }
     if (FIELD_EX32(s->regs[R_DMA_CONF], DMA_CONF, DMA_SEG_TRANS_EN) || FIELD_EX32(user, USER, USR_CONF_NXT)) {
         reject(s, "segmented transfer");
+        return false;
     }
     if (FIELD_EX32(s->regs[R_MISC], MISC, CK_IDLE_EDGE) || FIELD_EX32(user, USER, CK_OUT_EDGE)) {
         reject(s, "SPI mode other than 0");
+        return false;
     }
     if (FIELD_EX32(s->regs[R_CTRL], CTRL, RD_BIT_ORDER) || FIELD_EX32(s->regs[R_CTRL], CTRL, WR_BIT_ORDER)) {
         reject(s, "LSB-first bit order");
+        return false;
     }
     if (FIELD_EX32(s->regs[R_CTRL], CTRL, LINES) || FIELD_EX32(user, USER, FWRITE_LINES) ||
         FIELD_EX32(user, USER, QPI_MODE) || FIELD_EX32(user, USER, OPI_MODE)) {
         reject(s, "dual, quad or octal line mode");
+        return false;
     }
     if (FIELD_EX32(user, USER, SIO)) {
         reject(s, "3-wire (SIO) mode");
+        return false;
     }
     if (FIELD_EX32(user, USER, USR_MOSI_HIGHPART) || FIELD_EX32(user, USER, USR_MISO_HIGHPART)) {
         reject(s, "W8-W15 high-part buffer");
+        return false;
     }
+    return true;
 }
 
-static uint32_t whole_bytes(ESP32S3GpspiState *s, const char *phase, uint32_t bits)
+/* Returns false when the phase was rejected */
+static bool whole_bytes(ESP32S3GpspiState *s, const char *phase, uint32_t bits, uint32_t *bytes)
 {
     if (bits % 8) {
-        error_report("esp32s3_gpspi%d: %s phase of %u bits; whole bytes are modeled", s->bus, phase, bits);
-        abort();
+        picsimlab_reject("esp32s3_gpspi%d: %s phase of %u bits is not modeled; whole bytes are", s->bus, phase, bits);
+        return false;
     }
-    return bits / 8;
+    *bytes = bits / 8;
+    return true;
 }
 
 static uint8_t buf_byte(ESP32S3GpspiState *s, uint32_t i)
@@ -183,26 +192,29 @@ static bool gdma_channel(ESP32S3GpspiState *s, int dir, uint32_t *chan)
     return false;
 }
 
-static void fetch_mosi(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
+/* Returns false when the transfer was rejected */
+static bool fetch_mosi(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
 {
     uint32_t chan;
 
     if (!FIELD_EX32(s->regs[R_DMA_CONF], DMA_CONF, DMA_TX_ENA)) {
         if (len > GPSPI_BUF_BYTES) {
             reject(s, "CPU-buffer transfer over 64 bytes");
+            return false;
         }
         for (uint32_t i = 0; i < len; i++) {
             data[i] = buf_byte(s, i);
         }
     } else if (gdma_channel(s, ESP_GDMA_OUT_IDX, &chan)) {
         if (!esp_gdma_read_channel(s->gdma, chan, data, len)) {
-            error_report("esp32s3_gpspi%d: GDMA out channel %u could not supply %u bytes", s->bus, chan, len);
-            abort();
+            picsimlab_reject("esp32s3_gpspi%d: GDMA out channel %u could not supply %u bytes", s->bus, chan, len);
+            return false;
         }
     } else {
         /* MOSI enabled with no data queued, as in a full-duplex read */
         memset(data, MOSI_IDLE, len);
     }
+    return true;
 }
 
 static void store_miso(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
@@ -212,13 +224,13 @@ static void store_miso(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
     if (!FIELD_EX32(s->regs[R_DMA_CONF], DMA_CONF, DMA_RX_ENA)) {
         if (len > GPSPI_BUF_BYTES) {
             reject(s, "CPU-buffer transfer over 64 bytes");
+            return;
         }
         for (uint32_t i = 0; i < len; i++) {
             set_buf_byte(s, i, data[i]);
         }
     } else if (!gdma_channel(s, ESP_GDMA_IN_IDX, &chan) || !esp_gdma_write_channel(s->gdma, chan, data, len)) {
-        error_report("esp32s3_gpspi%d: no GDMA in channel took %u bytes", s->bus, len);
-        abort();
+        picsimlab_reject("esp32s3_gpspi%d: no GDMA in channel took %u bytes", s->bus, len);
     }
 }
 
@@ -231,19 +243,24 @@ static void run_transaction(ESP32S3GpspiState *s)
     uint32_t cmd_len = 0, addr_len = 0, dummy_len = 0;
     uint32_t data_len = 0;
 
-    check_supported(s);
-
-    if (FIELD_EX32(user, USER, USR_COMMAND)) {
-        cmd_len = whole_bytes(s, "command", FIELD_EX32(s->regs[R_USER2], USER2, USR_COMMAND_BITLEN) + 1);
+    if (!check_supported(s)) {
+        return;
     }
-    if (FIELD_EX32(user, USER, USR_ADDR)) {
-        addr_len = whole_bytes(s, "address", FIELD_EX32(s->regs[R_USER1], USER1, USR_ADDR_BITLEN) + 1);
+    if (FIELD_EX32(user, USER, USR_COMMAND) &&
+        !whole_bytes(s, "command", FIELD_EX32(s->regs[R_USER2], USER2, USR_COMMAND_BITLEN) + 1, &cmd_len)) {
+        return;
     }
-    if (FIELD_EX32(user, USER, USR_DUMMY)) {
-        dummy_len = whole_bytes(s, "dummy", FIELD_EX32(s->regs[R_USER1], USER1, USR_DUMMY_CYCLELEN) + 1);
+    if (FIELD_EX32(user, USER, USR_ADDR) &&
+        !whole_bytes(s, "address", FIELD_EX32(s->regs[R_USER1], USER1, USR_ADDR_BITLEN) + 1, &addr_len)) {
+        return;
     }
-    if (mosi || miso) {
-        data_len = whole_bytes(s, "data", FIELD_EX32(s->regs[R_MS_DLEN], MS_DLEN, MS_DATA_BITLEN) + 1);
+    if (FIELD_EX32(user, USER, USR_DUMMY) &&
+        !whole_bytes(s, "dummy", FIELD_EX32(s->regs[R_USER1], USER1, USR_DUMMY_CYCLELEN) + 1, &dummy_len)) {
+        return;
+    }
+    if ((mosi || miso) && !whole_bytes(s, "data", FIELD_EX32(s->regs[R_MS_DLEN], MS_DLEN, MS_DATA_BITLEN) + 1,
+                                       &data_len)) {
+        return;
     }
 
     /*
@@ -269,7 +286,9 @@ static void run_transaction(ESP32S3GpspiState *s)
     memset(out + pos, MOSI_IDLE, dummy_len);
     pos += dummy_len;
     if (mosi) {
-        fetch_mosi(s, out + pos, dout_len);
+        if (!fetch_mosi(s, out + pos, dout_len)) {
+            return;
+        }
     } else {
         memset(out + pos, MOSI_IDLE, dout_len);
     }

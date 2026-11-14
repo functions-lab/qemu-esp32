@@ -4,7 +4,7 @@
  * The PWM waveforms are not generated: the model keeps each timer's frequency
  * and each channel's duty in effect, and signals the board when either
  * changes. A duty update latches DUTY when PARA_UP is written with
- * DUTY_START set; fades are not modeled. A timer held in reset or without a
+ * DUTY_START set; fades are rejected. A timer held in reset or without a
  * clock does not count, so its channels output no PWM: they report duty 0.
  *
  * This program is free software; you can redistribute it and/or modify
@@ -14,11 +14,11 @@
 
 #include "qemu/osdep.h"
 #include "qemu/log.h"
-#include "qemu/error-report.h"
 #include "hw/sysbus.h"
 #include "hw/irq.h"
 #include "hw/registerfields.h"
 #include "hw/misc/esp32s3_ledc.h"
+#include "hw/xtensa/picsimlab.h"
 
 #define CH_STRIDE 0x14
 
@@ -106,8 +106,8 @@ static void update_channel(ESP32S3LEDCState *s, int ch)
 {
     if (FIELD_EX32(s->ch_conf1[ch], CH_CONF1, DUTY_START)) {
         if (FIELD_EX32(s->ch_conf1[ch], CH_CONF1, DUTY_SCALE) != 0) {
-            error_report("esp32s3_ledc: channel %d: duty fades are not modeled", ch);
-            abort();
+            picsimlab_reject("esp32s3_ledc: channel %d: duty fades are not modeled", ch);
+            return;
         }
         s->ch_duty_r[ch] = s->ch_duty[ch];
         s->ch_conf1[ch] = FIELD_DP32(s->ch_conf1[ch], CH_CONF1, DUTY_START, 0);
@@ -132,8 +132,8 @@ static void update_timer(ESP32S3LEDCState *s, int timer)
 {
     if (!FIELD_EX32(s->timer_conf[timer], TIMER_CONF, TICK_SEL) &&
         FIELD_EX32(s->conf, CONF, APB_CLK_SEL) == 2) {
-        error_report("esp32s3_ledc: timer %d: the RC_FAST clock is not modeled", timer);
-        abort();
+        picsimlab_reject("esp32s3_ledc: timer %d: the RC_FAST clock is not modeled", timer);
+        return;
     }
     refresh_timer(s, timer);
 }
@@ -164,8 +164,8 @@ static uint64_t esp32s3_ledc_read(void *opaque, hwaddr addr, unsigned int size)
         if ((addr - A_TIMER_CONF) % 8 == 0) {
             return s->timer_conf[timer];
         }
-        error_report("esp32s3_ledc: reading timer %d's counter is not modeled", timer);
-        abort();
+        picsimlab_reject("esp32s3_ledc: reading timer %d's counter is not modeled", timer);
+        return 0;
     }
     switch (addr) {
     case A_INT_RAW:
@@ -193,8 +193,8 @@ static void esp32s3_ledc_write(void *opaque, hwaddr addr, uint64_t value, unsign
         switch (addr % CH_STRIDE) {
         case A_CH_CONF0:
             if (FIELD_EX32(value, CH_CONF0, OVF_CNT_EN)) {
-                error_report("esp32s3_ledc: channel %d: overflow counting is not modeled", ch);
-                abort();
+                picsimlab_reject("esp32s3_ledc: channel %d: overflow counting is not modeled", ch);
+                return;
             }
             s->ch_conf0[ch] = FIELD_DP32(value, CH_CONF0, PARA_UP, 0);
             if (FIELD_EX32(value, CH_CONF0, PARA_UP)) {
@@ -222,8 +222,8 @@ static void esp32s3_ledc_write(void *opaque, hwaddr addr, uint64_t value, unsign
         int timer = (addr - A_TIMER_CONF) / 8;
         if ((addr - A_TIMER_CONF) % 8 == 0) {
             if (FIELD_EX32(value, TIMER_CONF, PAUSE)) {
-                error_report("esp32s3_ledc: timer %d: pausing is not modeled", timer);
-                abort();
+                picsimlab_reject("esp32s3_ledc: timer %d: pausing is not modeled", timer);
+                return;
             }
             bool rst_changed = FIELD_EX32(value ^ s->timer_conf[timer], TIMER_CONF, RST);
 
@@ -239,8 +239,8 @@ static void esp32s3_ledc_write(void *opaque, hwaddr addr, uint64_t value, unsign
     switch (addr) {
     case A_INT_ENA:
         if (value & ~INT_DUTY_CHNG_END_ALL) {
-            error_report("esp32s3_ledc: interrupts 0x%" PRIx64 " are not modeled", value & ~INT_DUTY_CHNG_END_ALL);
-            abort();
+            picsimlab_reject("esp32s3_ledc: interrupts 0x%" PRIx64 " are not modeled", value & ~INT_DUTY_CHNG_END_ALL);
+            return;
         }
         s->int_ena = value;
         break;
