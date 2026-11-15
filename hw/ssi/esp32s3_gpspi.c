@@ -235,7 +235,7 @@ static void store_miso(ESP32S3GpspiState *s, uint8_t *data, uint32_t len)
         for (uint32_t i = 0; i < len; i++) {
             set_buf_byte(s, base + i, data[i]);
         }
-    } else if (!gdma_channel(s, ESP_GDMA_IN_IDX, &chan) || !esp_gdma_write_channel(s->gdma, chan, data, len)) {
+    } else if (!gdma_channel(s, ESP_GDMA_IN_IDX, &chan) || esp_gdma_write_channel(s->gdma, chan, data, len) < 0) {
         picsimlab_reject("esp32s3_gpspi%d: no GDMA in channel took %u bytes", s->bus, len);
     }
 }

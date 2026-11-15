@@ -403,9 +403,12 @@ bool esp_gdma_read_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uint
 
 /**
  * @brief Write data to the guest RAM pointed by the linked list configured in the given DmaConfigState index.
- *        `size` bytes from `buffer` will be written to guest machine's RAM.
+ *        `size` bytes from `buffer` will be written to guest machine's RAM. As on hardware, bytes past the end of
+ *        the list are dropped and raise IN_DSCR_EMPTY.
+ *
+ * @returns the number of bytes stored, or -1 on a descriptor error
  */
-bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uint32_t size)
+int esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uint32_t size)
 {
     DmaConfigState* state = &s->ch_conf[ESP_GDMA_IN_IDX][chan];
 
@@ -432,7 +435,7 @@ bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uin
 
     if ( !valid || (owner_check_in && !in_list.config.owner) ) {
         esp_gdma_set_status(&state->int_state, R_GDMA_INTERRUPT_IN_DSCR_ERR_MASK);
-        return false;
+        return -1;
     }
 
     /* Clear the number of bytes written to the "in" buffer and the owner */
@@ -441,6 +444,7 @@ bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uin
     uint32_t consumed = 0;
     bool exit_loop = false;
     bool error = false;
+    bool list_ended = false;
 
     while (!exit_loop && !error) {
 
@@ -490,6 +494,14 @@ bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uin
                 break;
             }
 
+            /* A null next address ends the list: the bytes left over are dropped */
+            if (next_addr == 0) {
+                esp_gdma_set_status(&state->int_state, R_GDMA_INTERRUPT_IN_DONE_MASK |
+                                                       R_GDMA_INTERRUPT_IN_DSCR_EMPTY_MASK);
+                list_ended = true;
+                break;
+            }
+
             /* In the case where the transfer is finished, we should still fetch the next node,
              * but we should not override the current in_list variable as it is used outside the loop
              * to reset the owner and update the suc_eof flag */
@@ -509,7 +521,7 @@ bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uin
         }
     }
 
-    if (!error) {
+    if (!error && !list_ended) {
         /* In all cases (error or not), let's set the End-of-list in the receiver */
         in_list.config.suc_eof = 1;
         in_list.config.owner = 0;
@@ -525,7 +537,7 @@ bool esp_gdma_write_channel(ESPGdmaState *s, uint32_t chan, uint8_t* buffer, uin
         esp_gdma_set_status(&state->int_state, R_GDMA_INTERRUPT_IN_DONE_MASK);
     }
 
-    return !error;
+    return error ? -1 : consumed;
 }
 
 

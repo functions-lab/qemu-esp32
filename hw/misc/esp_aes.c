@@ -193,7 +193,7 @@ static void esp_aes_dma_start(ESPAesState *s)
         goto close_exit;
     }
 
-    if ( !esp_gdma_write_channel(s->gdma, gdma_in_idx, buffer, buf_size) ) {
+    if ( esp_gdma_write_channel(s->gdma, gdma_in_idx, buffer, buf_size) != (int)buf_size ) {
         warn_report("[AES] Error writing to GDMA buffer");
         goto close_exit;
     }
